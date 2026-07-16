@@ -3,6 +3,18 @@ import fc from 'fast-check';
 /** Row の値として使う JSON 値。toEqual での構造比較に安定して使える。 */
 export const valueArb: fc.Arbitrary<unknown> = fc.jsonValue();
 
+/**
+ * Variant<R> の値として使う値。fc.jsonValue() の JsonObject が持つ
+ * optional index signature ({[key in string]?: JsonValue}) は、
+ * isTag/on/match/contract の R 推論(mapped type から R を逆算する処理)を
+ * 壊してしまうため、Variant 系のテストでは再帰のないプレーンな union を使う。
+ */
+export const variantValueArb: fc.Arbitrary<number | string | boolean> = fc.oneof(
+	fc.integer(),
+	fc.string(),
+	fc.boolean(),
+);
+
 /** Row のラベルとして使うキー。`__proto__` はオブジェクト表現を壊すため除外する。 */
 export const keyArb: fc.Arbitrary<string> = fc
 	.string({ minLength: 1 })
