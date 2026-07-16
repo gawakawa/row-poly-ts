@@ -1,5 +1,8 @@
 import fc from 'fast-check';
 
+/** Row の値として使う JSON 値。toEqual での構造比較に安定して使える。 */
+export const valueArb: fc.Arbitrary<unknown> = fc.jsonValue();
+
 /** Row のラベルとして使うキー。`__proto__` はオブジェクト表現を壊すため除外する。 */
 export const keyArb: fc.Arbitrary<string> = fc
 	.string({ minLength: 1 })
