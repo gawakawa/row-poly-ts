@@ -2,10 +2,7 @@ import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { contract, exhaustive, inj, isTag, match, on } from '../src/variant.js';
 import type { Variant } from '../src/variant.js';
-import { keyArb, variantValueArb } from './arbitraries.js';
-
-const differentKeyArb = (tag: string): fc.Arbitrary<string> =>
-	keyArb.filter((other) => other !== tag);
+import { distinctKeyPairArb, keyArb, variantValueArb } from './arbitraries.js';
 
 describe('inj / prj is implemented via isTag narrowing, exercised through on', () => {
 	it('on dispatches to the handler when the tag matches', () => {
@@ -25,20 +22,16 @@ describe('inj / prj is implemented via isTag narrowing, exercised through on', (
 
 	it('on dispatches to otherwise with the original variant when the tag mismatches', () => {
 		fc.assert(
-			fc.property(
-				keyArb.chain((tag) => fc.tuple(fc.constant(tag), differentKeyArb(tag))),
-				variantValueArb,
-				([tag, otherTag], value) => {
-					const v = inj(tag, value);
-					const result = on(
-						v,
-						otherTag,
-						(handled) => ({ kind: 'handled' as const, value: handled }),
-						(rest) => ({ kind: 'otherwise' as const, value: rest }),
-					);
-					expect(result).toEqual({ kind: 'otherwise', value: v });
-				},
-			),
+			fc.property(distinctKeyPairArb, variantValueArb, ([tag, otherTag], value) => {
+				const v = inj(tag, value);
+				const result = on(
+					v,
+					otherTag,
+					(handled) => ({ kind: 'handled' as const, value: handled }),
+					(rest) => ({ kind: 'otherwise' as const, value: rest }),
+				);
+				expect(result).toEqual({ kind: 'otherwise', value: v });
+			}),
 		);
 	});
 });
@@ -54,13 +47,9 @@ describe('isTag', () => {
 
 	it('is false for a different tag', () => {
 		fc.assert(
-			fc.property(
-				keyArb.chain((tag) => fc.tuple(fc.constant(tag), differentKeyArb(tag))),
-				variantValueArb,
-				([tag, otherTag], value) => {
-					expect(isTag(inj(tag, value), otherTag)).toBe(false);
-				},
-			),
+			fc.property(distinctKeyPairArb, variantValueArb, ([tag, otherTag], value) => {
+				expect(isTag(inj(tag, value), otherTag)).toBe(false);
+			}),
 		);
 	});
 });
@@ -89,14 +78,10 @@ describe('contract', () => {
 
 	it('returns undefined when its tag is not in the tag list', () => {
 		fc.assert(
-			fc.property(
-				keyArb.chain((tag) => fc.tuple(fc.constant(tag), differentKeyArb(tag))),
-				variantValueArb,
-				([tag, otherTag], value) => {
-					const v = inj(tag, value);
-					expect(contract(v, [otherTag])).toBeUndefined();
-				},
-			),
+			fc.property(distinctKeyPairArb, variantValueArb, ([tag, otherTag], value) => {
+				const v = inj(tag, value);
+				expect(contract(v, [otherTag])).toBeUndefined();
+			}),
 		);
 	});
 });
@@ -104,16 +89,17 @@ describe('contract', () => {
 describe('on chain + exhaustive', () => {
 	type Shape = { a: number; b: string; c: boolean };
 
-	// tsgolint(typescript-go preview) does not always reduce a chained
+	// tsgolint(typescript-go preview) does not reduce the final
 	// Variant<Omit<Omit<...>>> residual down to `never` from inference
-	// alone; explicit type arguments make each step's row concrete.
+	// alone; only the last `on` (the one feeding `exhaustive`) needs an
+	// explicit type argument to make that row concrete.
 	const dispatch = (v: Variant<Shape>): string =>
-		on<Shape, 'a', string, string>(
+		on(
 			v,
 			'a',
 			(n) => `a:${n}`,
 			(r1) =>
-				on<Omit<Shape, 'a'>, 'b', string, string>(
+				on(
 					r1,
 					'b',
 					(s) => `b:${s}`,

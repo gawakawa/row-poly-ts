@@ -21,7 +21,7 @@ export const keyArb: fc.Arbitrary<string> = fc
 	.filter((k) => k !== '__proto__');
 
 /** 任意の行。値は JSON 値に限定し、toEqual での構造比較を安定させる。 */
-export const rowArb: fc.Arbitrary<Record<string, unknown>> = fc.dictionary(keyArb, fc.jsonValue());
+export const rowArb: fc.Arbitrary<Record<string, unknown>> = fc.dictionary(keyArb, valueArb);
 
 /** 空でない行と、その行に含まれるキーの組。 */
 export const rowWithExistingKeyArb: fc.Arbitrary<{
@@ -39,3 +39,11 @@ export const rowWithAbsentKeyArb: fc.Arbitrary<{
 	.tuple(rowArb, keyArb)
 	.filter(([row, key]) => !(key in row))
 	.map(([row, key]) => ({ row, key }));
+
+/** 互いに異なる2つのキーの組。 */
+export const distinctKeyPairArb: fc.Arbitrary<[string, string]> = keyArb.chain((key) =>
+	fc.tuple(
+		fc.constant(key),
+		keyArb.filter((other) => other !== key),
+	),
+);

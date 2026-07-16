@@ -303,7 +303,7 @@ type Row = Record<string, unknown>;
 type Merge<L extends Row, R extends Row> = Omit<L, keyof R> & R;
 
 /** ラベル K を型 V で追加(既存なら上書き)。Merge の 1 フィールド版 */
-type Cons<K extends string, V, R extends Row> = Omit<R, K> & Record<K, V>;
+type Cons<K extends string, V, R extends Row> = Merge<R, Record<K, V>>;
 
 /** R がラベル K を持たないことの opt-in 検査。持つ場合 never に潰れる */
 type Lacks<R extends Row, K extends PropertyKey> = K extends keyof R ? never : unknown;
@@ -355,25 +355,38 @@ conditional type 版の `Lacks` はフラグと独立に機能する。
 型アサーションは 0 件である。
 
 `get`、`set`、`modify`、`insert`、`remove`、`merge`、`inj`、`isTag`、`prj` は自然な推論で戻り値型を満たす。
-残る `rename`、`on` の残余分岐、`contract` の3箇所は、4.5 節のとおり checker が「未解決 generic 上の型演算」を簡約できないために素朴な実装では通らないが、いずれも**アサーションではなく設計の変更**で解決する。
+残る箇所は、4.5 節のとおり checker が「未解決 generic 上の型演算」を簡約できないために素朴な実装では通らないが、いずれも**アサーションではなく設計の変更**で解決する。
+使う技法は次の二つに集約される。
 
-### rename: Lacks を検証しない raw ヘルパーへの委譲
+- **型ガード委譲**：実行時の `boolean` をユーザー定義型ガード(`v is X`)で包む。TypeScript がアサーションなしで narrowing を得る唯一の公式な手段であり、predicate の正しさ自体を checker は検証しない。`isTag` に加えて `isNotTag`(`on` の残余分岐用)、`isAnyTag`(`contract` 用)がこの形を取る。
+- **raw ヘルパーへの委譲**：`Lacks` 制約を検証しない unexported の関数に処理を任せ、公開 API はその制約付き型を被せた薄いラッパーにする。`rename`(および `insert`)がこの形を取る。
 
-`rename` の実装 `{ ...rest, [to]: value }` は、`to` が非リテラルな generic `string` であるため、`Record<L, R[K]>` ではなく index signature `{ [x: string]: R[K] }` に推論が潰れ、宣言した戻り値型に代入できない。
-これを、`Lacks` 制約を持たない unexported の `insertRaw` に委譲する形で解決する。
+### rename と insert: Lacks を検証しない raw ヘルパーへの委譲
+
+`rename` の素朴な実装 `{ ...rest, [to]: value }` は、`to` が非リテラルな generic `string` であるため、`Record<L, R[K]>` ではなく index signature `{ [x: string]: R[K] }` に推論が潰れ、宣言した戻り値型に代入できない。
+これを、`Lacks` 制約を持たない `insertRaw`(`src/internal/raw.ts`)に委譲する形で解決する。
 `insertRaw` は「追加するだけ」の関数で、キーの重複を型で保証しない。
-公開 `insert` はこれに `Lacks` 制約付きの型を被せただけの薄いラッパーであり、`rename` も同じ `insertRaw` を呼ぶ。
+公開 `insert` はこれに `Lacks` 制約付きの型を被せただけの薄いラッパーであり、`rename`(内部的には `renameRaw`)も同じ `insertRaw` を呼ぶ。
+`insertRaw`/`renameRaw` を `src/internal/` に置いて export するのは、テストの PBT ヘルパー(後述)からも同じ実装を再利用するためである。
 
 ```ts
-const insertRaw = <K extends string, V, R extends Row>(
+// src/internal/raw.ts
+export const insertRaw = <K extends string, V, R extends Row>(
 	rec: R,
 	key: K,
 	value: V,
-): Cons<K, V, R> => ({
-	...rec,
-	[key]: value,
-});
+): Cons<K, V, R> => ({ ...rec, [key]: value });
 
+export const renameRaw = <R extends Row, K extends keyof R & string, L extends string>(
+	rec: R,
+	from: K,
+	to: L,
+): Merge<Omit<R, K>, Record<L, R[K]>> => {
+	const { [from]: value, ...rest } = rec;
+	return insertRaw(rest, to, value);
+};
+
+// src/record.ts
 export const insert = <K extends string, V, R extends Row>(
 	rec: R & Lacks<R, K>,
 	key: K,
@@ -384,10 +397,7 @@ export const rename = <R extends Row, K extends keyof R & string, L extends stri
 	rec: R & Lacks<Omit<R, K>, L>,
 	from: K,
 	to: L,
-): Merge<Omit<R, K>, Record<L, R[K]>> => {
-	const { [from]: value, ...rest } = rec;
-	return insertRaw(rest, to, value);
-};
+): Merge<Omit<R, K>, Record<L, R[K]>> => renameRaw(rec, from, to);
 ```
 
 ### on: 二段の型ガードで両分岐を尽くす
@@ -395,13 +405,14 @@ export const rename = <R extends Row, K extends keyof R & string, L extends stri
 `on` の残余分岐では、`isTag` の否定(`else` 相当)だけでは `v` が `Variant<Omit<R, K>>` に narrowing されない。
 `Exclude<Variant<R>, Variant<Pick<R, K>>>` のような別表現に変えても checker はこれを `Variant<Omit<R, K>>` と同一だと証明できない(実装時に検証済み)。
 そこで `isTag` と対になる `isNotTag`(`v is Variant<Omit<R, K>>`)を追加し、両方の型ガードで分岐を尽くす。
+比較ロジックの重複を避けるため、`isNotTag` は `isTag` の否定として実装する。
 末尾は型を閉じるためだけの `throw`(到達しない。`isTag`/`isNotTag` は `v.tag` に対する相補的な比較なので、どちらかに必ず一致する)。
 
 ```ts
 const isNotTag = <R extends Row, K extends keyof R & string>(
 	v: Variant<R>,
 	tag: K,
-): v is Variant<Omit<R, K>> => v.tag !== tag;
+): v is Variant<Omit<R, K>> => !isTag(v, tag);
 
 export const on = <R extends Row, K extends keyof R & string, A, B>(
 	v: Variant<R>,
@@ -421,14 +432,13 @@ export const on = <R extends Row, K extends keyof R & string, A, B>(
 ### contract: 型ガード関数として実装する
 
 `contract` は `.some()` という配列操作の結果を直接返しているだけでは narrowing が起きない。
-`isTag` が `v.tag === tag` という比較の結果をそのままユーザー定義型ガードの本体として使えるのと同じ理屈で、複数タグ版の型ガード `isAnyTag` を新設する。
-ユーザー定義型ガードの本体は `boolean` を返しさえすればよく、predicate(`v is X`)の正しさ自体を checker は検証しない。
+複数タグ版の型ガード `isAnyTag` を新設し、各タグとの比較は `isTag` に委譲する。
 
 ```ts
 const isAnyTag = <R extends Row, K extends keyof R & string>(
 	v: Variant<R>,
 	tags: ReadonlyArray<K>,
-): v is Variant<Pick<R, K>> => tags.some((tag) => tag === v.tag);
+): v is Variant<Pick<R, K>> => tags.some((tag) => isTag(v, tag));
 
 export const contract = <R extends Row, K extends keyof R & string>(
 	v: Variant<R>,
@@ -436,11 +446,20 @@ export const contract = <R extends Row, K extends keyof R & string>(
 ): Variant<Pick<R, K>> | undefined => (isAnyTag(v, tags) ? v : undefined);
 ```
 
+### テスト側の回避策も同じ 4.5 節の制約に由来する
+
+ライブラリ本体だけでなく、テストコードも同じ「未解決 generic 上の型演算は簡約されない」という制約に何度かぶつかる。これは対症療法の場当たり的な積み重ねではなく、原因が共通する第三のカテゴリとして扱う。
+
+- `tests/record.test.ts` の PBT は、行の型が完全にジェネリックな `Record<string, unknown>` になる(`fc.dictionary` などで生成するため)。`keyof Record<string, unknown>` は `string` に潰れるので、`Lacks<Record<string, unknown>, K>` はどんな `K` に対しても `never` になり、公開 `insert`/`rename` をそもそも呼べない。テストは `src/internal/raw.ts` の `insertRaw`/`renameRaw` を直接使ってランタイム挙動だけを検査し、型レベルの `Lacks` 保証は `tests/record.test-d.ts` の具体型テストに委ねる。
+- `tests/variant.test.ts` の `on` チェーン(`exhaustive` まで到達させるもの)は、最終段の残余型 `Variant<Omit<Omit<Shape, 'a'>, 'b'>>` が `never` まで簡約されないことがある(tsgolint / typescript-go preview の推論の限界)。最終段の `on` 呼び出しにだけ明示的型引数を与えて回避する。
+
+いずれも `unsafeCoerce` のようなアサーションではなく、型が通る形へ処理を書き換えることで解決している。
+
 ### trusted computing base
 
 以前のバージョンは `unsafeCoerce` の呼び出し箇所のリストを trusted computing base としていたが、本ライブラリはこれを持たない。
 信頼境界は、公開 API が宣言する `Lacks` 制約付きのシグネチャそのものに移る。
-`insertRaw` のような unexported の raw ヘルパーは `Lacks` を検証せず前提とするが、これは通常の関数分割であり、型システムを迂回する操作ではない。
+`src/internal/raw.ts` の raw ヘルパーは `Lacks` を検証せず前提とするが、これは通常の関数分割であり、型システムを迂回する操作ではない。
 正当性は tests/ の型レベルテストと値レベルテストが具体型・具体値で担保する。
 
 ## 10. 採らなかった選択肢

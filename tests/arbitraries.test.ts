@@ -1,6 +1,11 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import { keyArb, rowWithAbsentKeyArb, rowWithExistingKeyArb } from './arbitraries.js';
+import {
+	distinctKeyPairArb,
+	keyArb,
+	rowWithAbsentKeyArb,
+	rowWithExistingKeyArb,
+} from './arbitraries.js';
 
 describe('keyArb', () => {
 	it('never produces __proto__', () => {
@@ -27,6 +32,16 @@ describe('rowWithAbsentKeyArb', () => {
 		fc.assert(
 			fc.property(rowWithAbsentKeyArb, ({ row, key }) => {
 				expect(Object.hasOwn(row, key)).toBe(false);
+			}),
+		);
+	});
+});
+
+describe('distinctKeyPairArb', () => {
+	it('generates two different keys', () => {
+		fc.assert(
+			fc.property(distinctKeyPairArb, ([a, b]) => {
+				expect(a).not.toBe(b);
 			}),
 		);
 	});

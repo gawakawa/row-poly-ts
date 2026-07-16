@@ -28,7 +28,7 @@ export const prj = <R extends Row, K extends keyof R & string>(
 const isNotTag = <R extends Row, K extends keyof R & string>(
 	v: Variant<R>,
 	tag: K,
-): v is Variant<Omit<R, K>> => v.tag !== tag;
+): v is Variant<Omit<R, K>> => !isTag(v, tag);
 
 /** 1 ケース処理と残余継続。残余では行が Omit<R, K> に縮む */
 export const on = <R extends Row, K extends keyof R & string, A, B>(
@@ -58,7 +58,7 @@ export const match = <R extends Row, B>(
 const isAnyTag = <R extends Row, K extends keyof R & string>(
 	v: Variant<R>,
 	tags: ReadonlyArray<K>,
-): v is Variant<Pick<R, K>> => tags.some((tag) => tag === v.tag);
+): v is Variant<Pick<R, K>> => tags.some((tag) => isTag(v, tag));
 
 /** 行の縮小。型は実行時に消去されるため、タグ一覧を値としても要求する。
  *  不一致なら undefined */
