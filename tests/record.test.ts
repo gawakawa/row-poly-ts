@@ -1,8 +1,7 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import { get, insert, merge, modify, remove, rename, set } from '../src/record.js';
-import { unsafeCoerce } from '../src/internal/coerce.js';
-import type { Cons, Lacks, Merge, Row } from '../src/row.js';
+import { get, merge, modify, remove, set } from '../src/record.js';
+import type { Cons, Merge, Row } from '../src/row.js';
 import {
 	keyArb,
 	rowArb,
@@ -16,21 +15,23 @@ import {
  * (DESIGN 5.2 節)、行がジェネリックな Record<string, unknown> のままでは
  * keyof R が string に潰れて Lacks が常に never になり、そもそも呼び出せない。
  * PBT は runtime の absence (rowWithAbsentKeyArb) を保証済みなので、
- * ここでは coerce だけ挟んでランタイム挙動を検査する。
+ * ここでは Lacks を持たない直接実装でランタイム挙動を検査する。
  * 型レベルの Lacks 保証自体は record.test-d.ts が別途検査する。
  */
 const insertUnchecked = <R extends Row, K extends string, V>(
 	row: R,
 	key: K,
 	value: V,
-): Cons<K, V, R> => insert<K, V, R>(unsafeCoerce<R, R & Lacks<R, K>>(row), key, value);
+): Cons<K, V, R> => ({ ...row, [key]: value });
 
 const renameUnchecked = <R extends Row, K extends keyof R & string, L extends string>(
 	row: R,
 	from: K,
 	to: L,
-): Merge<Omit<R, K>, Record<L, R[K]>> =>
-	rename<R, K, L>(unsafeCoerce<R, R & Lacks<Omit<R, K>, L>>(row), from, to);
+): Merge<Omit<R, K>, Record<L, R[K]>> => {
+	const { [from]: value, ...rest } = row;
+	return insertUnchecked(rest, to, value);
+};
 
 const expectUnchangedOtherKeys = (
 	before: Record<string, unknown>,

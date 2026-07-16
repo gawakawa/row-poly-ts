@@ -1,5 +1,17 @@
-import { unsafeCoerce } from './internal/coerce.js';
 import type { Cons, Lacks, Merge, Row } from './row.js';
+
+/**
+ * insert の Lacks 制約を検証せずに追加だけを行う内部ヘルパー。
+ * insert と rename の両方から使う。呼び出し元が Lacks を保証する。
+ */
+const insertRaw = <K extends string, V, R extends Row>(
+	rec: R,
+	key: K,
+	value: V,
+): Cons<K, V, R> => ({
+	...rec,
+	[key]: value,
+});
 
 /** フィールド選択。SML# の #key に相当 */
 export const get = <R extends Row, K extends keyof R & string>(rec: R, key: K): R[K] => rec[key];
@@ -22,7 +34,7 @@ export const insert = <K extends string, V, R extends Row>(
 	rec: R & Lacks<R, K>,
 	key: K,
 	value: V,
-): Cons<K, V, R> => ({ ...rec, [key]: value });
+): Cons<K, V, R> => insertRaw(rec, key, value);
 
 /** フィールド削除。delete は予約語のため remove とする */
 export const remove = <R extends Row, K extends keyof R & string>(rec: R, key: K): Omit<R, K> => {
@@ -43,5 +55,5 @@ export const rename = <R extends Row, K extends keyof R & string, L extends stri
 	to: L,
 ): Merge<Omit<R, K>, Record<L, R[K]>> => {
 	const { [from]: value, ...rest } = rec;
-	return unsafeCoerce({ ...rest, [to]: value });
+	return insertRaw(rest, to, value);
 };

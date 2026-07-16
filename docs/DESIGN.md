@@ -150,7 +150,7 @@ negated type(`not T`)の PR #29317 も性能問題で未マージであり、「
 
 この制約から二つの帰結が出る。
 第一に、row 演算を generic 関数の内部で合成するコードは型が通らないことがあり、これは仕様として 11 章の限界一覧に記載する。
-第二に、ライブラリ内部の実装では戻り値型を checker に証明させられない箇所が生じるため、集約された `unsafeCoerce` で埋める(9 章)。
+第二に、公開 API の実装そのものでは、`Lacks` 制約を検証せずに前提とする unexported の raw ヘルパーへ処理を委譲することで、型アサーションを一切使わずに書ける(9 章)。
 
 ## 5. レコード API
 
@@ -351,23 +351,97 @@ conditional type 版の `Lacks` はフラグと独立に機能する。
 - バリアント検査：`v.tag === tag` の比較
 
 本リポジトリの oxlint 設定は型アサーションを全面禁止している(`typescript/consistent-type-assertions: never`)。
-一方で 4.5 節のとおり、未解決 generic 上の型演算を戻り値型に持つ関数(`merge`、`on` の残余、`contract`、`modify`、`insert`)は、実装の式に戻り値型を checker が証明できない。
+本ライブラリはこれを例外なく守り、`oxlint-disable` によるルールの抑制も一切行わない。
+型アサーションは 0 件である。
 
-この矛盾は、アサーションを 1 ファイルに集約して解決する。
+`get`、`set`、`modify`、`insert`、`remove`、`merge`、`inj`、`isTag`、`prj` は自然な推論で戻り値型を満たす。
+残る `rename`、`on` の残余分岐、`contract` の3箇所は、4.5 節のとおり checker が「未解決 generic 上の型演算」を簡約できないために素朴な実装では通らないが、いずれも**アサーションではなく設計の変更**で解決する。
+
+### rename: Lacks を検証しない raw ヘルパーへの委譲
+
+`rename` の実装 `{ ...rest, [to]: value }` は、`to` が非リテラルな generic `string` であるため、`Record<L, R[K]>` ではなく index signature `{ [x: string]: R[K] }` に推論が潰れ、宣言した戻り値型に代入できない。
+これを、`Lacks` 制約を持たない unexported の `insertRaw` に委譲する形で解決する。
+`insertRaw` は「追加するだけ」の関数で、キーの重複を型で保証しない。
+公開 `insert` はこれに `Lacks` 制約付きの型を被せただけの薄いラッパーであり、`rename` も同じ `insertRaw` を呼ぶ。
 
 ```ts
-// src/internal/coerce.ts
-/* oxlint-disable typescript/consistent-type-assertions --
- * ライブラリ全体で唯一アサーションを許可するファイル。
- * 未解決 generic 上の Omit と交差は TS が簡約できないため(#28234 ほか)、
- * 各演算の戻り値型は checker に証明させられない。
- * 正当性は tests/ の型レベルテストと値レベルテストが具体型で担保する。 */
-export const unsafeCoerce = <A, B>(a: A): B => a as unknown as B;
+const insertRaw = <K extends string, V, R extends Row>(
+	rec: R,
+	key: K,
+	value: V,
+): Cons<K, V, R> => ({
+	...rec,
+	[key]: value,
+});
+
+export const insert = <K extends string, V, R extends Row>(
+	rec: R & Lacks<R, K>,
+	key: K,
+	value: V,
+): Cons<K, V, R> => insertRaw(rec, key, value);
+
+export const rename = <R extends Row, K extends keyof R & string, L extends string>(
+	rec: R & Lacks<Omit<R, K>, L>,
+	from: K,
+	to: L,
+): Merge<Omit<R, K>, Record<L, R[K]>> => {
+	const { [from]: value, ...rest } = rec;
+	return insertRaw(rest, to, value);
+};
 ```
 
-trusted computing base は `unsafeCoerce` の呼び出し箇所のリストである、という整理を保つ。
-`get`、`set`、`inj`、`isTag`、`prj` のように自然な推論で通る関数では使わない。
-特に `prj` は `isTag` の型ガードによる narrowing で `R[K]` が付くため、アサーションなしで実装できる。
+### on: 二段の型ガードで両分岐を尽くす
+
+`on` の残余分岐では、`isTag` の否定(`else` 相当)だけでは `v` が `Variant<Omit<R, K>>` に narrowing されない。
+`Exclude<Variant<R>, Variant<Pick<R, K>>>` のような別表現に変えても checker はこれを `Variant<Omit<R, K>>` と同一だと証明できない(実装時に検証済み)。
+そこで `isTag` と対になる `isNotTag`(`v is Variant<Omit<R, K>>`)を追加し、両方の型ガードで分岐を尽くす。
+末尾は型を閉じるためだけの `throw`(到達しない。`isTag`/`isNotTag` は `v.tag` に対する相補的な比較なので、どちらかに必ず一致する)。
+
+```ts
+const isNotTag = <R extends Row, K extends keyof R & string>(
+	v: Variant<R>,
+	tag: K,
+): v is Variant<Omit<R, K>> => v.tag !== tag;
+
+export const on = <R extends Row, K extends keyof R & string, A, B>(
+	v: Variant<R>,
+	tag: K,
+	handler: (value: R[K]) => A,
+	otherwise: (rest: Variant<Omit<R, K>>) => B,
+): A | B => {
+	if (isTag(v, tag)) return handler(v.value);
+	if (isNotTag(v, tag)) return otherwise(v);
+	throw new Error(`unreachable variant tag: ${String(v.tag)}`);
+};
+```
+
+`isTag` → `isNotTag` → `throw` の順序でなければならない。
+逆順(`isNotTag` を先に判定する)にすると、`isTag` 側の分岐で `v.value` が `R[K]` に narrowing されない。
+
+### contract: 型ガード関数として実装する
+
+`contract` は `.some()` という配列操作の結果を直接返しているだけでは narrowing が起きない。
+`isTag` が `v.tag === tag` という比較の結果をそのままユーザー定義型ガードの本体として使えるのと同じ理屈で、複数タグ版の型ガード `isAnyTag` を新設する。
+ユーザー定義型ガードの本体は `boolean` を返しさえすればよく、predicate(`v is X`)の正しさ自体を checker は検証しない。
+
+```ts
+const isAnyTag = <R extends Row, K extends keyof R & string>(
+	v: Variant<R>,
+	tags: ReadonlyArray<K>,
+): v is Variant<Pick<R, K>> => tags.some((tag) => tag === v.tag);
+
+export const contract = <R extends Row, K extends keyof R & string>(
+	v: Variant<R>,
+	tags: ReadonlyArray<K>,
+): Variant<Pick<R, K>> | undefined => (isAnyTag(v, tags) ? v : undefined);
+```
+
+### trusted computing base
+
+以前のバージョンは `unsafeCoerce` の呼び出し箇所のリストを trusted computing base としていたが、本ライブラリはこれを持たない。
+信頼境界は、公開 API が宣言する `Lacks` 制約付きのシグネチャそのものに移る。
+`insertRaw` のような unexported の raw ヘルパーは `Lacks` を検証せず前提とするが、これは通常の関数分割であり、型システムを迂回する操作ではない。
+正当性は tests/ の型レベルテストと値レベルテストが具体型・具体値で担保する。
 
 ## 10. 採らなかった選択肢
 
@@ -440,15 +514,15 @@ typecheck モードは tsc を用いるため、devDependency に `typescript` �
 
 1. **テスト基盤**：`pnpm add -D typescript`、`vitest.config.ts` の新設(typecheck 有効化)、`nix flake check` の hash mismatch エラーから `nix/node-modules.nix` のハッシュを更新(CLAUDE.md 記載の手順)。tsconfig の `declaration: true` が `tsc --noEmit` と衝突する場合は declaration 系オプションを外す(現状ビルド成果物を出していないため影響はない)
 2. **型レベル行演算**：`src/row.ts` と `tests/row.test-d.ts`
-3. **coerce**：`src/internal/coerce.ts`
-4. **レコード**：`src/record.ts` とテスト
-5. **バリアント**：`src/variant.ts` とテスト
-6. **公開面と限界の文書化**：`src/index.ts`、`tests/limits.test.ts` / `limits.test-d.ts`、README の拡充
+3. **レコード**：`src/record.ts` とテスト
+4. **バリアント**：`src/variant.ts` とテスト
+5. **公開面と限界の文書化**：`src/index.ts`、`tests/limits.test.ts` / `limits.test-d.ts`、README の拡充
 
 各段階で `nix fmt` と `nix flake check` を通す。
 
 実装時の検証ポイントが二つある。
-computed key の rest destructuring に対する `Omit` 推論は TypeScript バージョン依存の細部があるため、レコード実装の冒頭で最小ケースを確認し、通らなければ `unsafeCoerce` にフォールバックする。
+computed key の rest destructuring に対する `Omit` 推論は TypeScript バージョン依存の細部があるため、レコード実装の冒頭で最小ケースを確認する。
+通らない場合はアサーションで埋めるのではなく、9 章のとおり `Lacks` を検証しない unexported の raw ヘルパーへ処理を委譲する形に設計を変える。
 `match` の戻り値 `B` がハンドラ間の union として推論されるかも同様に確認し、問題があれば戻り値型を `{ [K in keyof R]: ReturnType<...> }[keyof R]` 方式に切り替える。
 
 ## 14. 参考文献
