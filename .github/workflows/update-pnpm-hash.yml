@@ -1,0 +1,101 @@
+name: 'Update pnpm deps hash'
+
+on:
+  pull_request:
+    paths:
+      - 'pnpm-lock.yaml'
+
+permissions:
+  contents: write
+
+jobs:
+  update-hash:
+    name: Update fetchPnpmDeps hash
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App Token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          client-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@bec50b45a8bb06017c42af46702a3f502adcfa9e # v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
+        with:
+          name: gawakawa
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Update pnpm deps hash
+        run: |
+          echo "=== Current hash line ==="
+          grep 'hash = ' nix/node-modules.nix
+
+          echo "=== Building fetchPnpmDeps to get correct hash ==="
+          # pname/version/pnpm/fetcherVersion below must stay in sync with
+          # nix/node-modules.nix (pnpm here mirrors nix/toolchain.nix's pnpmPackage).
+          NIX_OUTPUT=$(nix build --no-link --impure --expr '
+            let
+              pkgs = (builtins.getFlake (toString ./.)).inputs.nixpkgs.legacyPackages.x86_64-linux;
+            in
+            pkgs.fetchPnpmDeps {
+              pname = "pnpm-project-deps";
+              version = "1.0.0";
+              src = ./.;
+              pnpm = pkgs.pnpm_10;
+              fetcherVersion = 3;
+              hash = "";
+            }
+          ' 2>&1) || true
+          echo "$NIX_OUTPUT"
+
+          echo "=== Extracting hash ==="
+          HASH=$(echo "$NIX_OUTPUT" | grep 'got:' | awk '{print $2}')
+
+          if [ -z "$HASH" ]; then
+            echo "Failed to extract hash from nix output"
+            echo "=== Full nix output for debugging ==="
+            echo "$NIX_OUTPUT"
+            exit 1
+          fi
+
+          echo "New hash: $HASH"
+          sed -i "s|hash = \"sha256-[^\"]*\"|hash = \"$HASH\"|" nix/node-modules.nix
+
+          echo "=== Final hash line ==="
+          grep 'hash = ' nix/node-modules.nix
+
+      - name: Check for changes
+        id: changes
+        run: |
+          if git diff --quiet nix/node-modules.nix; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit and push
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add nix/node-modules.nix
+          git commit -m "🔒 Update fetchPnpmDeps hash"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          HEAD_REF: ${{ github.head_ref }}
