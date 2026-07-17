@@ -7,8 +7,10 @@
 		"test": "vitest run"
 	},
 	"devDependencies": {
+		"fast-check": "^4.9.0",
 		"oxlint": "^1.32.0",
 		"oxlint-tsgolint": "^0.24.0",
+		"typescript": "^7.0.2",
 		"vitest": "^4.1.10"
 	}
 }
